@@ -66,32 +66,28 @@ public:
             if (_configs.size() > 8) _configs.pop_front();
             return;
         }
-        if (!frame->keyFrame()) return;
-
-        // 每次关键帧到达均替换候选快照，使最终结果属于最新 GOP。
-        // Replace the candidate on each key frame so the result belongs to the latest GOP.
-        VideoKeyFrameSnapshot candidate;
-        candidate.codec = frame->getCodecId();
-        candidate.dts = frame->dts();
-        candidate.pts = frame->pts();
-        if (frame->size() == 0 || frame->size() > _max_bytes) {
-            // 超限时清除旧候选，不能退回上一 GOP 并冒充最新画面。
-            // Clear an older candidate on overflow instead of presenting it as the latest GOP.
+        if (frame->keyFrame()) {
+            // 一个视频画面可能含多个 NAL；关键帧标记只保证首个切片。
+            // A picture may contain multiple NAL units; the key flag may mark only its first slice.
             _latest = VideoKeyFrameSnapshot{};
+            _latest.codec = frame->getCodecId();
+            _latest.dts = frame->dts();
+            _latest.pts = frame->pts();
+            _collecting_picture = true;
+            for (const auto &config : _configs) {
+                if (config->getCodecId() == _latest.codec && !appendBounded(config)) return;
+            }
+            appendBounded(frame);
             return;
         }
-        candidate.bytes = frame->size();
-        for (const auto &config : _configs) {
-            if (config->getCodecId() != candidate.codec) continue;
-            if (config->size() > _max_bytes - candidate.bytes) {
-                _latest = VideoKeyFrameSnapshot{};
-                return;
-            }
-            candidate.bytes += config->size();
-            candidate.frames.emplace_back(config);
+        if (!_collecting_picture) return;
+        if (frame->getCodecId() != _latest.codec || frame->pts() != _latest.pts) {
+            _collecting_picture = false;
+            return;
         }
-        candidate.frames.emplace_back(frame);
-        _latest = std::move(candidate);
+        // 追加同一 PTS 的后续视频切片，确保解码器收到完整画面。
+        // Append subsequent video slices with the same PTS so the decoder sees a complete picture.
+        appendBounded(frame);
     }
 
     /**
@@ -107,12 +103,33 @@ public:
     }
 
 private:
+    /**
+     * 有界追加一帧；超限即丢弃整张画面，绝不回退到上一关键帧。
+     * Append one frame within limits; reject the whole picture on overflow
+     * instead of falling back to a stale key frame.
+     * @param frame 待追加视频帧 / Video frame to append.
+     * @return 是否成功追加 / Whether it was appended.
+     */
+    bool appendBounded(const Frame::Ptr &frame) {
+        if (frame->size() == 0 || frame->size() > _max_bytes - _latest.bytes
+            || _latest.frames.size() >= 64) {
+            _latest = VideoKeyFrameSnapshot{};
+            _collecting_picture = false;
+            return false;
+        }
+        _latest.bytes += frame->size();
+        _latest.frames.emplace_back(frame);
+        return true;
+    }
+
     /// 本次请求的总字节上限 / Combined byte limit for this request.
     size_t _max_bytes;
     /// 最多八个最近配置帧引用 / Up to eight recent configuration-frame references.
     std::deque<Frame::Ptr> _configs;
     /// 最新完整关键帧候选 / Latest complete key-frame candidate.
     VideoKeyFrameSnapshot _latest;
+    /// 是否继续收集当前关键画面的切片 / Whether the current key picture still accepts slices.
+    bool _collecting_picture = false;
 };
 
 } // namespace mediakit

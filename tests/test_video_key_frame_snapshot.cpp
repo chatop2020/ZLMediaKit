@@ -52,30 +52,35 @@ int main() {
     auto config = makeFrame(CodecH264, 4, 1, false, true);
     auto old_key = makeFrame(CodecH264, 10, 2, true, false);
     auto latest_key = makeFrame(CodecH264, 12, 3, true, false);
+    auto latest_slice = makeFrame(CodecH264, 6, 3, false, false);
     builder.inputFrame(makeFrame(CodecAAC, 8, 2, false, false));
     builder.inputFrame(config);
     builder.inputFrame(old_key);
     builder.inputFrame(makeFrame(CodecH264, 6, 2, false, false));
     builder.inputFrame(latest_key);
+    builder.inputFrame(makeFrame(CodecAAC, 5, 3, false, false));
+    builder.inputFrame(latest_slice);
+    builder.inputFrame(makeFrame(CodecH264, 7, 4, false, false));
 
     VideoKeyFrameSnapshot snapshot;
     if (!builder.take(snapshot) || snapshot.codec != CodecH264 || snapshot.pts != 3
-        || snapshot.bytes != 16 || snapshot.frames.size() != 2
-        || snapshot.frames.back() != latest_key || snapshot.frames.front() != config) {
+        || snapshot.bytes != 22 || snapshot.frames.size() != 3
+        || snapshot.frames[1] != latest_key || snapshot.frames.back() != latest_slice
+        || snapshot.frames.front() != config) {
         std::cerr << "latest video key-frame snapshot failed" << std::endl;
         return 1;
     }
 
     // 模拟缓存轮换：释放源引用，快照仍持有自身引用。
     // Simulate cache rotation: release source references while the snapshot retains its own.
-    config.reset(); old_key.reset(); latest_key.reset();
+    config.reset(); old_key.reset(); latest_key.reset(); latest_slice.reset();
     if (!snapshot.frames.front() || snapshot.frames.front()->size() != 4
-        || !snapshot.frames.back() || snapshot.frames.back()->size() != 12) return 2;
+        || !snapshot.frames.back() || snapshot.frames.back()->size() != 6) return 2;
 
     VideoKeyFrameSnapshotBuilder overflow(16);
     overflow.inputFrame(makeFrame(CodecH264, 4, 4, false, true));
     overflow.inputFrame(makeFrame(CodecH264, 8, 5, true, false));
-    overflow.inputFrame(makeFrame(CodecH264, 20, 6, true, false));
+    overflow.inputFrame(makeFrame(CodecH264, 12, 5, false, false));
     VideoKeyFrameSnapshot rejected;
     if (overflow.take(rejected)) return 3;
 

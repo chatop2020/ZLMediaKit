@@ -405,7 +405,7 @@ API_EXPORT void API_CALL mk_media_source_get_latest_video_key_frame(const char *
     if (!cb) return;
     if (!schema || !vhost || !app || !stream || max_bytes == 0) {
         WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
-            cb(user_data, -3, CodecInvalid, 0, 0, nullptr, 0);
+            cb(user_data, -3, CodecInvalid, 0, 0, 0, nullptr, 0);
         });
         return;
     }
@@ -416,14 +416,14 @@ API_EXPORT void API_CALL mk_media_source_get_latest_video_key_frame(const char *
     // Complete missing-source requests asynchronously to keep callback threading consistent.
     if (!source || !muxer) {
         WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
-            cb(user_data, -1, CodecInvalid, 0, 0, nullptr, 0);
+            cb(user_data, -1, CodecInvalid, 0, 0, 0, nullptr, 0);
         });
         return;
     }
     auto poller = source->getOwnerPoller();
     if (!poller) {
         WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
-            cb(user_data, -4, CodecInvalid, 0, 0, nullptr, 0);
+            cb(user_data, -4, CodecInvalid, 0, 0, 0, nullptr, 0);
         });
         return;
     }
@@ -433,19 +433,22 @@ API_EXPORT void API_CALL mk_media_source_get_latest_video_key_frame(const char *
         auto snapshot = std::make_shared<VideoKeyFrameSnapshot>();
         if (!muxer->getLatestVideoKeyFrameSnapshot(*snapshot, max_bytes)) {
             WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
-                cb(user_data, -2, CodecInvalid, 0, 0, nullptr, 0);
+                cb(user_data, -2, CodecInvalid, 0, 0, 0, nullptr, 0);
             });
             return;
         }
+        // 流身份在媒体线程确定；慢回调不应延长整个媒体源的生存期。
+        // Capture stream identity on the media thread; a slow callback must not retain the whole source.
+        const auto source_create_stamp = source->getCreateStamp();
         // 帧引用移交工作线程；用户回调或数据复制绝不在媒体源 poller 执行。
         // Hand frame references to a worker; user callbacks/copies never run on the media poller.
-        WorkThreadPool::Instance().getExecutor()->async([snapshot, user_data, cb]() {
+        WorkThreadPool::Instance().getExecutor()->async([snapshot, source_create_stamp, user_data, cb]() {
             std::vector<mk_frame> handles;
             handles.reserve(snapshot->frames.size());
             // 句柄只借用快照中的 shared_ptr；回调需要长期持有时显式 mk_frame_ref。
             // Handles borrow snapshot shared_ptrs; callers explicitly use mk_frame_ref to retain them.
             for (auto &frame : snapshot->frames) handles.emplace_back((mk_frame)&frame);
-            cb(user_data, 0, snapshot->codec, snapshot->dts, snapshot->pts,
+            cb(user_data, 0, snapshot->codec, snapshot->dts, snapshot->pts, source_create_stamp,
                handles.data(), handles.size());
         });
     });

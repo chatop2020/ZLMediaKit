@@ -245,11 +245,13 @@ API_EXPORT mk_media_source API_CALL mk_media_source_find2(const char *schema,
  * @param codec_id 视频编码类型 / Video codec ID.
  * @param dts 关键帧解码时间戳，毫秒 / Key-frame decoding timestamp, milliseconds.
  * @param pts 关键帧显示时间戳，毫秒 / Key-frame presentation timestamp, milliseconds.
+ * @param source_create_stamp 媒体源创建标识，用来区分同一路流重连前后的缓存；失败时为零。
+ * @param source_create_stamp Media-source creation stamp distinguishing a stream before and after reconnection; zero on failure.
  * @param frames 借用的配置帧与关键帧列表 / Borrowed configuration and key frames.
  * @param frame_count 列表长度 / Frame count.
  */
 typedef void(API_CALL *on_mk_video_key_frame_snapshot)(void *user_data, int code, int codec_id,
-                                                        uint64_t dts, uint64_t pts,
+                                                        uint64_t dts, uint64_t pts, uint64_t source_create_stamp,
                                                         const mk_frame frames[], size_t frame_count);
 
 /**

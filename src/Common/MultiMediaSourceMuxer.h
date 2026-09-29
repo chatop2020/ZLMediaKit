@@ -22,6 +22,7 @@
 #include "Rtmp/RtmpMediaSourceMuxer.h"
 #include "TS/TSMediaSourceMuxer.h"
 #include "FMP4/FMP4MediaSourceMuxer.h"
+#include "Common/VideoKeyFrameSnapshot.h"
 
 namespace mediakit {
 
@@ -195,6 +196,20 @@ public:
 #endif // ENABLE_RTPPROXY
 
     void addProbe(uint32_t probe_ms, const std::function<void(const std::list<FrameInfo> &info_list)> &cb);
+
+    /**
+     * 从已有 GOP 缓存取得最新视频关键帧快照；必须在媒体源所属 poller 调用。
+     * Get the latest video key-frame snapshot from the existing GOP cache;
+     * call this on the media source's owning poller.
+     * @param result 输出共享帧引用，缓存轮换后仍有效；在媒体线程外复制帧数据。
+     * @param result Output shared frame references that survive cache rotation;
+     *               copy payloads outside the media thread.
+     * @param max_bytes 配置帧与关键帧总字节上限，超限返回 false。
+     * @param max_bytes Maximum combined payload size; return false if exceeded.
+     * @return 找到有界的视频关键帧时返回 true；无缓存或无关键帧时返回 false。
+     * @return True for a bounded video key frame; false when the cache/key frame is absent.
+     */
+    bool getLatestVideoKeyFrameSnapshot(VideoKeyFrameSnapshot &result, size_t max_bytes = 2 * 1024 * 1024);
 
 protected:
     /////////////////////////////////MediaSink override/////////////////////////////////

@@ -864,6 +864,16 @@ void MultiMediaSourceMuxer::addProbe(uint32_t probe_ms, const std::function<void
     });
 }
 
+// 仅从现有 GOP 缓存读取共享引用，不在媒体线程复制压缩帧数据。
+// Read shared references from the existing GOP cache only; do not copy payloads on the media thread.
+bool MultiMediaSourceMuxer::getLatestVideoKeyFrameSnapshot(VideoKeyFrameSnapshot &result, size_t max_bytes) {
+    CHECK(getOwnerPoller(MediaSource::NullMediaSource())->isCurrentThread());
+    if (!_ring) return false;
+    VideoKeyFrameSnapshotBuilder builder(max_bytes);
+    _ring->flushGop([&](const Frame::Ptr &frame) { builder.inputFrame(frame); });
+    return builder.take(result);
+}
+
 bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
     if (_on_frame) {
         _on_frame(frame_in);

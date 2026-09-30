@@ -69,6 +69,11 @@ public:
         if (frame->keyFrame()) {
             // 一个视频画面可能含多个 NAL；关键帧标记只保证首个切片。
             // A picture may contain multiple NAL units; the key flag may mark only its first slice.
+            if (_collecting_picture && frame->getCodecId() == _candidate.codec
+                && frame->pts() == _candidate.pts) {
+                appendBounded(frame);
+                return;
+            }
             if (_collecting_picture && !_candidate.frames.empty()) _latest = std::move(_candidate);
             _candidate = VideoKeyFrameSnapshot{};
             _candidate.codec = frame->getCodecId();
@@ -103,6 +108,19 @@ public:
     bool take(VideoKeyFrameSnapshot &result) {
         if (_latest.frames.empty()) return false;
         result = std::move(_latest);
+        return true;
+    }
+
+    /**
+     * 复制已确认完整画面的共享引用，不消费缓存；供多个按需请求复用同一张图。
+     * Copy shared references to the confirmed-complete picture without consuming it.
+     * @param result 输出快照 / Output snapshot.
+     * @param max_bytes 调用者允许的总字节数 / Caller payload limit.
+     * @return 有完整且未超限的画面时为 true / True for a complete picture within the caller limit.
+     */
+    bool copyLatest(VideoKeyFrameSnapshot &result, size_t max_bytes) const {
+        if (_latest.frames.empty() || _latest.bytes > max_bytes) return false;
+        result = _latest;
         return true;
     }
 

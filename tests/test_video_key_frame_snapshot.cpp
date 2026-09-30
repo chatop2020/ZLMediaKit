@@ -97,6 +97,19 @@ int main() {
     if (incomplete.take(rejected)) return 5;
     incomplete.inputFrame(makeFrame(CodecH264, 7, 10, false, false));
     if (!incomplete.take(rejected) || rejected.pts != 9 || rejected.frames.size() != 3) return 6;
+
+    // 无普通帧的按需缓存仍能在下一关键画面到来时确认前一张，多个请求复用引用。
+    // A key-only cache confirms the previous picture on the next key; multiple requests reuse references.
+    VideoKeyFrameSnapshotBuilder tracker;
+    tracker.inputFrame(makeFrame(CodecH264, 4, 11, false, true));
+    tracker.inputFrame(makeFrame(CodecH264, 10, 12, true, false));
+    tracker.inputFrame(makeFrame(CodecH264, 5, 12, true, false));
+    if (tracker.copyLatest(rejected, 32)) return 7;
+    tracker.inputFrame(makeFrame(CodecH264, 12, 13, true, false));
+    VideoKeyFrameSnapshot first, second;
+    if (!tracker.copyLatest(first, 32) || !tracker.copyLatest(second, 32)
+        || first.pts != 12 || first.frames.size() != 3 || second.frames != first.frames) return 8;
+    if (tracker.copyLatest(rejected, 16)) return 9;
     std::cout << "video key-frame snapshot tests passed" << std::endl;
     return 0;
 }

@@ -23,6 +23,9 @@ namespace toolkit {
 namespace mediakit {
 
 namespace {
+// 按需关键画面引用的闲置释放间隔；覆盖常见五秒抽样周期。
+// Idle release interval for on-demand picture references; spans common five-second sampling.
+constexpr uint64_t kFrameTapIdleMs = 30000;
 class MediaSourceForMuxer : public MediaSource {
 public:
     MediaSourceForMuxer(const MultiMediaSourceMuxer::Ptr &muxer)
@@ -813,6 +816,14 @@ void MultiMediaSourceMuxer::createGopCacheIfNeed() {
 }
 
 void MultiMediaSourceMuxer::resetTracks() {
+    {
+        // 轨道重建意味着编码配置已变，不能让旧关键画面进入新流实例。
+        // Track reset changes codec configuration; never expose an old picture in a new stream instance.
+        std::lock_guard<std::mutex> lock(_frame_tap_mutex);
+        _frame_tap_tracker.reset();
+        _frame_tap_active.store(false, std::memory_order_release);
+        ++_frame_tap_generation;
+    }
     MediaSink::resetTracks();
 
     if (_rtmp) {
@@ -864,14 +875,44 @@ void MultiMediaSourceMuxer::addProbe(uint32_t probe_ms, const std::function<void
     });
 }
 
-// 仅从现有 GOP 缓存读取共享引用，不在媒体线程复制压缩帧数据。
-// Read shared references from the existing GOP cache only; do not copy payloads on the media thread.
+// 先从已有 GOP 种子初始化，再按需保留一张已完成关键画面的共享引用；媒体线程不复制压缩数据。
+// Seed from the existing GOP, then retain shared references to one complete key picture on demand.
 bool MultiMediaSourceMuxer::getLatestVideoKeyFrameSnapshot(VideoKeyFrameSnapshot &result, size_t max_bytes) {
     CHECK(getOwnerPoller(MediaSource::NullMediaSource())->isCurrentThread());
     if (!_ring) return false;
-    VideoKeyFrameSnapshotBuilder builder(max_bytes);
-    _ring->flushGop([&](const Frame::Ptr &frame) { builder.inputFrame(frame); });
-    return builder.take(result);
+    bool created = false;
+    uint64_t generation = 0;
+    if (!_frame_tap_active.load(std::memory_order_acquire)) {
+        // 首次请求只复用已有 GOP 的帧引用；此后按需跟踪且空闲释放。
+        // Seed from existing GOP references on first request, then track only while requested.
+        std::unique_ptr<VideoKeyFrameSnapshotBuilder> seeded(new VideoKeyFrameSnapshotBuilder());
+        _ring->flushGop([&](const Frame::Ptr &frame) { seeded->inputFrame(frame); });
+        std::lock_guard<std::mutex> lock(_frame_tap_mutex);
+        if (!_frame_tap_tracker) {
+            _frame_tap_tracker = std::move(seeded);
+            generation = ++_frame_tap_generation;
+            created = true;
+        }
+        _frame_tap_active.store(true, std::memory_order_release);
+    }
+    if (created) {
+        std::weak_ptr<MultiMediaSourceMuxer> weak_self = shared_from_this();
+        // 无后续视频帧时也要按空闲时间释放引用，不能依赖帧回调触发清理。
+        // Release references after idle time even if no later frame arrives.
+        getOwnerPoller(MediaSource::NullMediaSource())->doDelayTask(kFrameTapIdleMs, [weak_self, generation]() -> uint64_t {
+            auto self = weak_self.lock();
+            if (!self) return 0;
+            std::lock_guard<std::mutex> lock(self->_frame_tap_mutex);
+            if (self->_frame_tap_generation != generation || !self->_frame_tap_tracker) return 0;
+            if (self->_frame_tap_last_request.elapsedTime() <= kFrameTapIdleMs) return kFrameTapIdleMs;
+            self->_frame_tap_tracker.reset();
+            self->_frame_tap_active.store(false, std::memory_order_release);
+            return 0;
+        });
+    }
+    std::lock_guard<std::mutex> lock(_frame_tap_mutex);
+    _frame_tap_last_request.resetTime();
+    return _frame_tap_tracker && _frame_tap_tracker->copyLatest(result, max_bytes);
 }
 
 bool MultiMediaSourceMuxer::onTrackFrame(const Frame::Ptr &frame_in) {
@@ -922,6 +963,19 @@ bool MultiMediaSourceMuxer::onTrackFrame_l(const Frame::Ptr &frame_in) {
         // In this scenario, due to direct forwarding, there may be data cached in the pipeline due to thread switching, so CacheAbleFrame is needed
         frame = Frame::getCacheAbleFrame(frame);
         if (frame->getTrackType() == TrackVideo) {
+            if (_frame_tap_active.load(std::memory_order_acquire)) {
+                std::lock_guard<std::mutex> lock(_frame_tap_mutex);
+                if (_frame_tap_tracker) {
+                    if (_frame_tap_last_request.elapsedTime() > kFrameTapIdleMs) {
+                        _frame_tap_tracker.reset();
+                        _frame_tap_active.store(false, std::memory_order_release);
+                    } else {
+                        // 每帧仅保留共享引用；关键画面完成由后续时间戳或下一关键帧证明。
+                        // Retain only shared references; a later timestamp or key frame confirms completion.
+                        _frame_tap_tracker->inputFrame(frame);
+                    }
+                }
+            }
             // 视频时，遇到第一帧配置帧或关键帧则标记为gop开始处  [AUTO-TRANSLATED:66247aa8]
             // When it is a video, if the first frame configuration frame or key frame is encountered, it is marked as the beginning of the GOP
             auto video_key_pos = frame->keyFrame() || frame->configFrame();

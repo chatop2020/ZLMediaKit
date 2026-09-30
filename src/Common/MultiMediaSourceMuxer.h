@@ -23,6 +23,9 @@
 #include "TS/TSMediaSourceMuxer.h"
 #include "FMP4/FMP4MediaSourceMuxer.h"
 #include "Common/VideoKeyFrameSnapshot.h"
+#include <atomic>
+#include <memory>
+#include <mutex>
 
 namespace mediakit {
 
@@ -198,8 +201,8 @@ public:
     void addProbe(uint32_t probe_ms, const std::function<void(const std::list<FrameInfo> &info_list)> &cb);
 
     /**
-     * 从已有 GOP 缓存取得最新视频关键帧快照；必须在媒体源所属 poller 调用。
-     * Get the latest video key-frame snapshot from the existing GOP cache;
+     * 从已有 GOP 缓存及按需保留的完整画面引用取得快照；必须在媒体源所属 poller 调用。
+     * Get a complete key-picture snapshot from the GOP cache and on-demand retained references;
      * call this on the media source's owning poller.
      * @param result 输出共享帧引用，缓存轮换后仍有效；在媒体线程外复制帧数据。
      * @param result Output shared frame references that survive cache rotation;
@@ -273,6 +276,21 @@ private:
     HlsFMP4Recorder::Ptr _hls_fmp4;
     toolkit::EventPoller::Ptr _poller;
     RingType::Ptr _ring;
+    /// 仅被按需请求激活的完整关键画面引用，媒体线程不复制压缩帧数据。
+    /// Complete key-picture references activated only by on-demand requests; no payload copy on the media thread.
+    std::unique_ptr<VideoKeyFrameSnapshotBuilder> _frame_tap_tracker;
+    /// 激活状态的无锁快速检查，未启用时每帧只付出一次原子读取。
+    /// Lock-free active check; inactive streams pay only one atomic read per frame.
+    std::atomic<bool> _frame_tap_active{false};
+    /// 保护跨线程请求与视频帧输入时的少量共享引用。
+    /// Protect a small number of shared references across request and frame-input threads.
+    std::mutex _frame_tap_mutex;
+    /// 上次取帧请求时间；空闲后释放历史帧引用。
+    /// Last request time; release retained frame references after inactivity.
+    toolkit::Ticker _frame_tap_last_request;
+    /// 当前激活轮次，防止旧定时器清理后来重新激活的缓存。
+    /// Activation generation preventing an old timer from clearing a newly activated cache.
+    uint64_t _frame_tap_generation = 0;
     MediaSinkInterface::Ptr _delegate;
     // 对象个数统计  [AUTO-TRANSLATED:3b43e8c2]
     // Object count statistics

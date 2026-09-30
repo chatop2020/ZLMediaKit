@@ -87,6 +87,16 @@ int main() {
     VideoKeyFrameSnapshotBuilder audio_only;
     audio_only.inputFrame(makeFrame(CodecAAC, 8, 7, true, false));
     if (audio_only.take(rejected)) return 4;
+
+    // 缓存恰好在关键帧切片中途被读取时不能返回可能无法解码的半张画面。
+    // A cache read during key-picture slices must not return a possibly undecodable partial picture.
+    VideoKeyFrameSnapshotBuilder incomplete;
+    incomplete.inputFrame(makeFrame(CodecH264, 4, 8, false, true));
+    incomplete.inputFrame(makeFrame(CodecH264, 10, 9, true, false));
+    incomplete.inputFrame(makeFrame(CodecH264, 5, 9, false, false));
+    if (incomplete.take(rejected)) return 5;
+    incomplete.inputFrame(makeFrame(CodecH264, 7, 10, false, false));
+    if (!incomplete.take(rejected) || rejected.pts != 9 || rejected.frames.size() != 3) return 6;
     std::cout << "video key-frame snapshot tests passed" << std::endl;
     return 0;
 }

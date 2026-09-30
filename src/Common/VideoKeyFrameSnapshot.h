@@ -69,19 +69,23 @@ public:
         if (frame->keyFrame()) {
             // 一个视频画面可能含多个 NAL；关键帧标记只保证首个切片。
             // A picture may contain multiple NAL units; the key flag may mark only its first slice.
-            _latest = VideoKeyFrameSnapshot{};
-            _latest.codec = frame->getCodecId();
-            _latest.dts = frame->dts();
-            _latest.pts = frame->pts();
+            if (_collecting_picture && !_candidate.frames.empty()) _latest = std::move(_candidate);
+            _candidate = VideoKeyFrameSnapshot{};
+            _candidate.codec = frame->getCodecId();
+            _candidate.dts = frame->dts();
+            _candidate.pts = frame->pts();
             _collecting_picture = true;
             for (const auto &config : _configs) {
-                if (config->getCodecId() == _latest.codec && !appendBounded(config)) return;
+                if (config->getCodecId() == _candidate.codec && !appendBounded(config)) return;
             }
             appendBounded(frame);
             return;
         }
         if (!_collecting_picture) return;
-        if (frame->getCodecId() != _latest.codec || frame->pts() != _latest.pts) {
+        if (frame->getCodecId() != _candidate.codec || frame->pts() != _candidate.pts) {
+            // 看到下一张视频画面的时间戳后，上一张的全部切片才确定已收齐。
+            // Only the next picture's timestamp proves all slices of the prior picture arrived.
+            _latest = std::move(_candidate);
             _collecting_picture = false;
             return;
         }
@@ -91,10 +95,10 @@ public:
     }
 
     /**
-     * 移出当前最新快照，调用者在媒体线程外复制有效载荷。
-     * Move out the latest snapshot; the caller copies payloads outside the media thread.
+     * 移出最新已确认完整的快照，调用者在媒体线程外复制有效载荷。
+     * Move out the latest confirmed-complete snapshot; the caller copies payloads outside the media thread.
      * @param result 输出快照 / Output snapshot.
-     * @return 是否找到符合上限的视频关键帧 / Whether a bounded video key frame was found.
+     * @return 是否找到已确认完整且符合上限的视频关键画面 / Whether a confirmed-complete, bounded key picture was found.
      */
     bool take(VideoKeyFrameSnapshot &result) {
         if (_latest.frames.empty()) return false;
@@ -111,14 +115,15 @@ private:
      * @return 是否成功追加 / Whether it was appended.
      */
     bool appendBounded(const Frame::Ptr &frame) {
-        if (frame->size() == 0 || frame->size() > _max_bytes - _latest.bytes
-            || _latest.frames.size() >= 64) {
+        if (frame->size() == 0 || frame->size() > _max_bytes - _candidate.bytes
+            || _candidate.frames.size() >= 64) {
+            _candidate = VideoKeyFrameSnapshot{};
             _latest = VideoKeyFrameSnapshot{};
             _collecting_picture = false;
             return false;
         }
-        _latest.bytes += frame->size();
-        _latest.frames.emplace_back(frame);
+        _candidate.bytes += frame->size();
+        _candidate.frames.emplace_back(frame);
         return true;
     }
 
@@ -126,8 +131,10 @@ private:
     size_t _max_bytes;
     /// 最多八个最近配置帧引用 / Up to eight recent configuration-frame references.
     std::deque<Frame::Ptr> _configs;
-    /// 最新完整关键帧候选 / Latest complete key-frame candidate.
+    /// 最新已确认完整的关键画面 / Latest confirmed-complete key picture.
     VideoKeyFrameSnapshot _latest;
+    /// 正在接收同一 PTS 后续切片的候选画面 / Candidate awaiting later slices with the same PTS.
+    VideoKeyFrameSnapshot _candidate;
     /// 是否继续收集当前关键画面的切片 / Whether the current key picture still accepts slices.
     bool _collecting_picture = false;
 };

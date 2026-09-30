@@ -228,6 +228,47 @@ API_EXPORT mk_media_source API_CALL mk_media_source_find2(const char *schema,
                                                           const char *app,
                                                           const char *stream,
                                                           int from_mp4);
+
+/**
+ * 按媒体源身份异步取得当前 GOP 缓存中的最新视频关键帧和配置帧。
+ * Asynchronously obtain the latest video key frame and configuration frames
+ * from the media source's existing GOP cache.
+ * 回调在工作线程执行；帧引用只在回调内有效，跨回调使用须调用 mk_frame_ref，
+ * 并最终调用 mk_frame_unref。音频帧永不返回，且本函数不会解码或复制帧数据。
+ * The callback runs on a worker thread. Frame handles are borrowed for the
+ * callback only; use mk_frame_ref/mk_frame_unref to retain them. Audio frames
+ * are never returned, and this function neither decodes nor copies payloads.
+ * @param user_data 调用者上下文 / Caller context.
+ * @param code 0 成功；-1 流不存在，-2 无缓存关键帧，-3 参数无效，-4 无媒体线程。
+ * @param code 0 success; -1 missing source, -2 no cached key frame,
+ *             -3 invalid arguments, -4 missing media poller.
+ * @param codec_id 视频编码类型 / Video codec ID.
+ * @param dts 关键帧解码时间戳，毫秒 / Key-frame decoding timestamp, milliseconds.
+ * @param pts 关键帧显示时间戳，毫秒 / Key-frame presentation timestamp, milliseconds.
+ * @param source_create_stamp 媒体源创建标识，用来区分同一路流重连前后的缓存；失败时为零。
+ * @param source_create_stamp Media-source creation stamp distinguishing a stream before and after reconnection; zero on failure.
+ * @param frames 借用的配置帧与关键帧列表 / Borrowed configuration and key frames.
+ * @param frame_count 列表长度 / Frame count.
+ */
+typedef void(API_CALL *on_mk_video_key_frame_snapshot)(void *user_data, int code, int codec_id,
+                                                        uint64_t dts, uint64_t pts, uint64_t source_create_stamp,
+                                                        const mk_frame frames[], size_t frame_count);
+
+/**
+ * 通过稳定流身份请求一个有界的视频关键帧快照，不需要先获取易失的裸媒体源指针。
+ * Request a bounded video key-frame snapshot by stable stream identity without
+ * retaining an ephemeral raw media-source pointer.
+ * @param schema 流协议；空字符串按 ZLM 默认顺序查找 / Schema; empty string uses ZLM lookup order.
+ * @param vhost 虚拟主机 / Virtual host.
+ * @param app 应用名 / Application name.
+ * @param stream 流 ID / Stream ID.
+ * @param max_bytes 配置帧与关键帧总字节上限 / Combined payload byte limit.
+ * @param user_data 透传调用者上下文 / Forwarded caller context.
+ * @param cb 完成回调，必须非空 / Completion callback; must be non-null.
+ */
+API_EXPORT void API_CALL mk_media_source_get_latest_video_key_frame(const char *schema,
+    const char *vhost, const char *app, const char *stream, size_t max_bytes,
+    void *user_data, on_mk_video_key_frame_snapshot cb);
 //MediaSource::for_each_media()
 API_EXPORT void API_CALL mk_media_source_for_each(void *user_data, on_mk_media_source_find_cb cb, const char *schema,
                                                   const char *vhost, const char *app, const char *stream);

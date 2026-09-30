@@ -11,6 +11,8 @@
 #include <assert.h>
 #include "mk_events_objects.h"
 #include "Common/config.h"
+#include "Common/MultiMediaSourceMuxer.h"
+#include "Thread/WorkThreadPool.h"
 #include "Record/MP4Recorder.h"
 #include "Http/HttpSession.h"
 #include "Http/HttpBody.h"
@@ -392,6 +394,64 @@ API_EXPORT mk_media_source API_CALL mk_media_source_find2(const char *schema,
     assert(schema && vhost && app && stream);
     auto src = MediaSource::find(schema, vhost, app, stream, from_mp4);
     return (mk_media_source)src.get();
+}
+
+// 在媒体线程只收集缓存帧引用，将回调放到工作线程，避免慢调用者阻塞直播。
+// Collect cache references on the media thread and run callbacks on a worker
+// thread so a slow caller cannot block live media delivery.
+API_EXPORT void API_CALL mk_media_source_get_latest_video_key_frame(const char *schema,
+    const char *vhost, const char *app, const char *stream, size_t max_bytes,
+    void *user_data, on_mk_video_key_frame_snapshot cb) {
+    if (!cb) return;
+    if (!schema || !vhost || !app || !stream || max_bytes == 0) {
+        WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
+            cb(user_data, -3, CodecInvalid, 0, 0, 0, nullptr, 0);
+        });
+        return;
+    }
+    auto source = *schema ? MediaSource::find(schema, vhost, app, stream)
+                          : MediaSource::find(vhost, app, stream);
+    auto muxer = source ? source->getMuxer() : nullptr;
+    // 流不存在时也异步完成回调，保持所有返回路径的线程约定一致。
+    // Complete missing-source requests asynchronously to keep callback threading consistent.
+    if (!source || !muxer) {
+        WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
+            cb(user_data, -1, CodecInvalid, 0, 0, 0, nullptr, 0);
+        });
+        return;
+    }
+    auto poller = source->getOwnerPoller();
+    if (!poller) {
+        WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
+            cb(user_data, -4, CodecInvalid, 0, 0, 0, nullptr, 0);
+        });
+        return;
+    }
+    // 共享持有媒体源，避免请求排队期间流从注册表消失导致悬空指针。
+    // Retain the media source while queued so registry removal cannot leave a dangling pointer.
+    poller->async([source, muxer, max_bytes, user_data, cb]() {
+        auto snapshot = std::make_shared<VideoKeyFrameSnapshot>();
+        if (!muxer->getLatestVideoKeyFrameSnapshot(*snapshot, max_bytes)) {
+            WorkThreadPool::Instance().getExecutor()->async([user_data, cb]() {
+                cb(user_data, -2, CodecInvalid, 0, 0, 0, nullptr, 0);
+            });
+            return;
+        }
+        // 流身份在媒体线程确定；慢回调不应延长整个媒体源的生存期。
+        // Capture stream identity on the media thread; a slow callback must not retain the whole source.
+        const auto source_create_stamp = source->getCreateStamp();
+        // 帧引用移交工作线程；用户回调或数据复制绝不在媒体源 poller 执行。
+        // Hand frame references to a worker; user callbacks/copies never run on the media poller.
+        WorkThreadPool::Instance().getExecutor()->async([snapshot, source_create_stamp, user_data, cb]() {
+            std::vector<mk_frame> handles;
+            handles.reserve(snapshot->frames.size());
+            // 句柄只借用快照中的 shared_ptr；回调需要长期持有时显式 mk_frame_ref。
+            // Handles borrow snapshot shared_ptrs; callers explicitly use mk_frame_ref to retain them.
+            for (auto &frame : snapshot->frames) handles.emplace_back((mk_frame)&frame);
+            cb(user_data, 0, snapshot->codec, snapshot->dts, snapshot->pts, source_create_stamp,
+               handles.data(), handles.size());
+        });
+    });
 }
 
 API_EXPORT void API_CALL mk_media_source_for_each(void *user_data, on_mk_media_source_find_cb cb, const char *schema,
